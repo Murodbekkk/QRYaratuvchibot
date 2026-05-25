@@ -1,160 +1,139 @@
 # =========================================================
-# MURODBEK PROFESSIONAL QR BOT — TO'LIQ MUKAMMAL VERSIYA
-# =========================================================
-# INSTALL:
-# pip install pyTelegramBotAPI qrcode pillow pyzbar opencv-python
+#  MURODBEK PROFESSIONAL QR BOT  —  YANGI VERSIYA
+#  0 dan qayta yozilgan  |  2025
 # =========================================================
 
 # =========================================================
-# CONFIG
+#  CONFIG
 # =========================================================
-TOKEN = "8608839152:AAF2BTh1h1ppv8J56ZX8Oy2vAkzr69gv7EY"
-OWNER_ID = 8133971943
-# Boshlang'ich kanal (keyinchalik Telegramdan qo'shish/o'chirish mumkin)
+TOKEN            = "8608839152:AAF2BTh1h1ppv8J56ZX8Oy2vAkzr69gv7EY"
+OWNER_ID         = 8133971943
 DEFAULT_CHANNELS = ["@murodbek_rashidov"]
+RATE_LIMIT_SEC   = 2
+
 # =========================================================
-# IMPORTS
+#  IMPORTS
 # =========================================================
-import telebot
-from telebot import types
-import sqlite3
+import io
 import os
 import time
-import io
+import sqlite3
 from datetime import datetime
+
+import qrcode
+import telebot
+from telebot import types
 from PIL import Image
 import cv2
+
 try:
     from pyzbar.pyzbar import decode as pyzbar_decode
-    PYZBAR_AVAILABLE = True
+    PYZBAR_OK = True
 except ImportError:
-    PYZBAR_AVAILABLE = False
-import qrcode
+    PYZBAR_OK = False
 
-def generate_qr(text):
-    qr = qrcode.make(text)
-    qr.save("qr_code.png")  # Yaratilgan QR kodini fayl sifatida saqlash
 # =========================================================
-# BOT
+#  BOT
 # =========================================================
-
 bot = telebot.TeleBot(TOKEN)
 
 # =========================================================
-# DATABASE
+#  DATABASE
 # =========================================================
-
 conn   = sqlite3.connect("qrbot.db", check_same_thread=False)
 cursor = conn.cursor()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users(
+cursor.executescript("""
+CREATE TABLE IF NOT EXISTS users (
     user_id     INTEGER PRIMARY KEY,
     full_name   TEXT,
     phone       TEXT,
     username    TEXT,
     joined_date TEXT
-)""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS admins(
+);
+CREATE TABLE IF NOT EXISTS admins (
     user_id INTEGER PRIMARY KEY
-)""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS qr_history(
+);
+CREATE TABLE IF NOT EXISTS qr_history (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id      INTEGER,
     qr_text      TEXT,
     created_date TEXT
-)""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS banned_users(
+);
+CREATE TABLE IF NOT EXISTS banned_users (
     user_id     INTEGER PRIMARY KEY,
     reason      TEXT,
     banned_date TEXT
-)""")
-
-# Kanallar dinamik boshqariladi
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS channels(
+);
+CREATE TABLE IF NOT EXISTS channels (
     channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
     username   TEXT UNIQUE
-)""")
+);
+""")
 
-# Boshlang'ich kanallarni qo'sh (agar yo'q bo'lsa)
-for ch in DEFAULT_CHANNELS:
-    cursor.execute(
-        "INSERT OR IGNORE INTO channels(username) VALUES(?)",
-        (ch,)
-    )
-
+for _ch in DEFAULT_CHANNELS:
+    cursor.execute("INSERT OR IGNORE INTO channels(username) VALUES(?)", (_ch,))
 conn.commit()
 
 # =========================================================
-# KANAL HELPER
+#  HELPERS
 # =========================================================
 
 def get_channels() -> list:
     cursor.execute("SELECT username FROM channels")
-    return [row[0] for row in cursor.fetchall()]
+    return [r[0] for r in cursor.fetchall()]
 
-# =========================================================
-# RATE LIMITING
-# =========================================================
+def is_owner(uid: int) -> bool:
+    return uid == OWNER_ID
 
-_last_action: dict = {}
-RATE_LIMIT_SEC = 2
+def is_admin(uid: int) -> bool:
+    if is_owner(uid):
+        return True
+    cursor.execute("SELECT 1 FROM admins WHERE user_id=?", (uid,))
+    return cursor.fetchone() is not None
 
-def is_rate_limited(user_id: int) -> bool:
+def is_banned(uid: int) -> bool:
+    cursor.execute("SELECT 1 FROM banned_users WHERE user_id=?", (uid,))
+    return cursor.fetchone() is not None
+
+def is_registered(uid: int) -> bool:
+    cursor.execute("SELECT 1 FROM users WHERE user_id=?", (uid,))
+    return cursor.fetchone() is not None
+
+def save_qr_history(uid: int, text: str):
+    cursor.execute(
+        "INSERT INTO qr_history(user_id, qr_text, created_date) VALUES(?,?,?)",
+        (uid, text, datetime.now().strftime("%d.%m.%Y %H:%M"))
+    )
+    conn.commit()
+
+# ─── Rate limit ───────────────────────────────────────────
+_last: dict = {}
+
+def rate_limited(uid: int) -> bool:
     now = time.time()
-    if user_id in _last_action:
-        if now - _last_action[user_id] < RATE_LIMIT_SEC:
-            return True
-    _last_action[user_id] = now
+    if uid in _last and now - _last[uid] < RATE_LIMIT_SEC:
+        return True
+    _last[uid] = now
     return False
 
-# =========================================================
-# ROLE HELPERS
-# =========================================================
-
-def is_owner(user_id: int) -> bool:
-    return user_id == OWNER_ID
-
-def is_admin(user_id: int) -> bool:
-    if is_owner(user_id):
-        return True
-    cursor.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,))
-    return cursor.fetchone() is not None
-
-def is_banned(user_id: int) -> bool:
-    cursor.execute("SELECT 1 FROM banned_users WHERE user_id=?", (user_id,))
-    return cursor.fetchone() is not None
-
-# =========================================================
-# GUARD
-# =========================================================
-
-def guard(message) -> bool:
-    uid = message.from_user.id
+# ─── Guard ────────────────────────────────────────────────
+def guard(msg) -> bool:
+    uid = msg.from_user.id
     if is_banned(uid):
-        bot.send_message(message.chat.id, "🚫 Siz botdan bloklangansiz.")
+        bot.send_message(msg.chat.id, "🚫 Siz botdan bloklangansiz.")
         return False
-    if is_rate_limited(uid):
-        bot.send_message(message.chat.id, "⏳ Iltimos biroz kuting (spam himoya).")
+    if rate_limited(uid):
+        bot.send_message(msg.chat.id, "⏳ Iltimos biroz kuting (spam himoya).")
         return False
     return True
 
-# =========================================================
-# MAJBURIY OBUNA
-# =========================================================
-
-def check_sub(user_id: int) -> bool:
+# ─── Subscription ─────────────────────────────────────────
+def check_sub(uid: int) -> bool:
     for ch in get_channels():
         try:
-            member = bot.get_chat_member(ch, user_id)
-            if member.status not in ("member", "administrator", "creator"):
+            m = bot.get_chat_member(ch, uid)
+            if m.status not in ("member", "administrator", "creator"):
                 return False
         except Exception as e:
             print(f"[check_sub] {e}")
@@ -162,206 +141,240 @@ def check_sub(user_id: int) -> bool:
     return True
 
 def sub_keyboard():
-    markup = types.InlineKeyboardMarkup()
+    kb = types.InlineKeyboardMarkup()
     for ch in get_channels():
-        markup.add(
-            types.InlineKeyboardButton(
-                f"📢 {ch} — Obuna bo'lish",
-                url=f"https://t.me/{ch.lstrip('@')}"
-            )
-        )
-    markup.add(
-        types.InlineKeyboardButton("✅ Obuna bo'ldim — Tekshirish", callback_data="check_sub")
-    )
-    return markup
+        kb.add(types.InlineKeyboardButton(
+            f"📢 {ch} — Obuna bo'lish",
+            url=f"https://t.me/{ch.lstrip('@')}"
+        ))
+    kb.add(types.InlineKeyboardButton(
+        "✅ Obuna bo'ldim — Tekshirish",
+        callback_data="check_sub"
+    ))
+    return kb
 
 # =========================================================
-# CANCEL HELPER
+#  MENYULAR
 # =========================================================
 
-def cancel_kb():
-    m = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    m.add("❌ Bekor")
-    return m
+def show_main_menu(chat_id: int, uid: int):
+    """Rol bo'yicha to'g'ri menyuni ko'rsatadi."""
+    if is_owner(uid):
+        _owner_panel(chat_id)
+    elif is_admin(uid):
+        _admin_panel(chat_id)
+    else:
+        _user_menu(chat_id)
 
-def is_cancel(msg) -> bool:
-    return bool(msg.text and msg.text.strip() == "❌ Bekor")
+def _user_menu(chat_id: int):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("📷 QR Yaratish", "🎨 Rangli QR")
+    kb.row("🖼 QR O'qish")
+    kb.row("👤 Profil",       "📜 Tarix")
+    kb.row("🗑 Tarixni Tozalash", "ℹ️ Bot Haqida")
+    bot.send_message(chat_id, "🏠 <b>Asosiy Menyu</b>", reply_markup=kb, parse_mode="HTML")
+
+def _admin_panel(chat_id: int):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("👥 Userlar",    "🔍 Qidirish")
+    kb.row("📊 Statistika", "📤 Eksport")
+    kb.row("📢 Broadcast",  "💬 Xabar Yuborish")
+    kb.row("📷 QR Yaratish","🎨 Rangli QR")
+    kb.row("🖼 QR O'qish",  "👤 Profil")
+    kb.row("ℹ️ Bot Haqida")
+    bot.send_message(chat_id, "🛠 <b>Admin Paneli</b>", reply_markup=kb, parse_mode="HTML")
+
+def _owner_panel(chat_id: int):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("👥 Userlar",     "🔍 Qidirish")
+    kb.row("📊 Statistika",  "📤 Eksport")
+    kb.row("📢 Broadcast",   "💬 Xabar Yuborish")
+    kb.row("🛡 Adminlar",    "➕ Admin Qo'sh",    "➖ Admin O'chir")
+    kb.row("🔨 Ban",         "🔓 Unban",           "🚫 Banlist")
+    kb.row("📡 Kanallar",    "➕ Kanal Qo'sh",    "➖ Kanal O'chir")
+    kb.row("📷 QR Yaratish", "🎨 Rangli QR")
+    kb.row("🖼 QR O'qish",   "👤 Profil")
+    kb.row("ℹ️ Bot Haqida")
+    bot.send_message(chat_id, "👑 <b>Ega Paneli</b>", reply_markup=kb, parse_mode="HTML")
 
 # =========================================================
-# MAIN MENU  (admin/ega uchun qo'shimcha tugmalar)
-# =========================================================
-
-def main_menu(chat_id, user_id=None):
-    if user_id is None:
-        user_id = chat_id
-
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("📷 QR Kod Yaratish", "🎨 Rangli QR")
-    markup.row("🖼 Rasm QR O'qish")
-    markup.row("👤 Profil", "📜 Tarix")
-    markup.row("🗑 Tarixni Tozalash", "ℹ️ Bot Haqida")
-
-    # Admin/ega uchun bosh sahifada panel tugmasi
-    if is_owner(user_id):
-        markup.row("👑 Ega Paneli")
-    elif is_admin(user_id):
-        markup.row("🛠 Admin Paneli")
-
-    bot.send_message(chat_id, "🏠 Asosiy Menu", reply_markup=markup)
-
-# =========================================================
-# START
+#  /start
 # =========================================================
 
 @bot.message_handler(commands=["start"])
-def start(message):
+def cmd_start(message):
     if not guard(message):
         return
-
     uid = message.from_user.id
 
     if not check_sub(uid):
         bot.send_message(
             message.chat.id,
-            (
-                "👋 Xush kelibsiz!\n\n"
-                "❗ Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:"
-            ),
+            "👋 Xush kelibsiz!\n\n"
+            "❗ Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:",
             reply_markup=sub_keyboard()
         )
         return
 
-    cursor.execute("SELECT 1 FROM users WHERE user_id=?", (uid,))
-    if cursor.fetchone():
-        main_menu(message.chat.id, uid)
+    if is_registered(uid):
+        show_main_menu(message.chat.id, uid)
         return
 
+    # Yangi foydalanuvchi — ro'yxatdan o'tkazish
     msg = bot.send_message(
         message.chat.id,
-        "👋 Xush kelibsiz!\n\n👤 Ism Familiyangizni kiriting:",
-        reply_markup=cancel_kb()
+        "👋 Xush kelibsiz!\n\n👤 Ism Familiyangizni kiriting:"
     )
-    bot.register_next_step_handler(msg, get_name)
+    bot.register_next_step_handler(msg, reg_get_name)
+
+# /panel buyrug'i
+@bot.message_handler(commands=["panel"])
+def cmd_panel(message):
+    if not is_admin(message.from_user.id):
+        return
+    show_main_menu(message.chat.id, message.from_user.id)
 
 # =========================================================
-# REGISTRATION
+#  RO'YXATDAN O'TISH
 # =========================================================
 
-def get_name(message):
-    if is_cancel(message):
-        bot.send_message(message.chat.id, "❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
+def reg_get_name(message):
+    full_name = message.text.strip() if message.text else ""
+    if not full_name:
+        msg = bot.send_message(message.chat.id, "❌ Ism bo'sh bo'lishi mumkin emas. Qayta kiriting:")
+        bot.register_next_step_handler(msg, reg_get_name)
         return
-    full_name = message.text.strip()
-    m = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    m.add(types.KeyboardButton("📱 Telefon Raqam Yuborish", request_contact=True))
-    m.add("❌ Bekor")
-    msg = bot.send_message(message.chat.id, "📞 Telefon raqamingizni yuboring:", reply_markup=m)
-    bot.register_next_step_handler(msg, lambda x: save_user(x, full_name))
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(types.KeyboardButton("📱 Telefon Raqam Yuborish", request_contact=True))
+    msg = bot.send_message(
+        message.chat.id,
+        f"✅ Ism saqlandi: <b>{full_name}</b>\n\n📞 Telefon raqamingizni yuboring:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    bot.register_next_step_handler(msg, lambda m: reg_save(m, full_name))
 
-def save_user(message, full_name):
-    if is_cancel(message):
-        bot.send_message(message.chat.id, "❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
-        return
+def reg_save(message, full_name):
     if not message.contact:
-        msg = bot.send_message(message.chat.id, "❌ Iltimos tugma orqali telefon yuboring.", reply_markup=cancel_kb())
-        bot.register_next_step_handler(msg, lambda x: save_user(x, full_name))
+        kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        kb.add(types.KeyboardButton("📱 Telefon Raqam Yuborish", request_contact=True))
+        msg = bot.send_message(
+            message.chat.id,
+            "❌ Iltimos tugma orqali telefon raqam yuboring:",
+            reply_markup=kb
+        )
+        bot.register_next_step_handler(msg, lambda m: reg_save(m, full_name))
         return
-    uid  = message.from_user.id
-    user = message.from_user.username
+
+    uid   = message.from_user.id
     phone = message.contact.phone_number
+    uname = message.from_user.username
     cursor.execute(
-        "INSERT OR REPLACE INTO users VALUES (?,?,?,?,?)",
-        (uid, full_name, phone, user, datetime.now().strftime("%d.%m.%Y %H:%M"))
+        "INSERT OR REPLACE INTO users VALUES(?,?,?,?,?)",
+        (uid, full_name, phone, uname, datetime.now().strftime("%d.%m.%Y %H:%M"))
     )
     conn.commit()
-    bot.send_message(message.chat.id, "✅ Muvaffaqiyatli ro'yxatdan o'tdingiz!", reply_markup=types.ReplyKeyboardRemove())
-    main_menu(message.chat.id, uid)
+    bot.send_message(
+        message.chat.id,
+        "✅ Muvaffaqiyatli ro'yxatdan o'tdingiz!",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    show_main_menu(message.chat.id, uid)
 
 # =========================================================
-# QR — ODDIY
+#  QR — ODDIY
 # =========================================================
 
-@bot.message_handler(func=lambda m: m.text == "📷 QR Kod Yaratish")
+@bot.message_handler(func=lambda m: m.text == "📷 QR Yaratish")
 def qr_create(message):
     if not guard(message):
         return
-    msg = bot.send_message(message.chat.id, "✍️ Matn yoki link yuboring:", reply_markup=cancel_kb())
-    bot.register_next_step_handler(msg, generate_qr)
+    msg = bot.send_message(message.chat.id, "✍️ Matn yoki link yuboring:")
+    bot.register_next_step_handler(msg, qr_make)
 
-def generate_qr(message):
-    if is_cancel(message):
-        main_menu(message.chat.id, message.from_user.id)
+def qr_make(message):
+    if not message.text:
+        bot.send_message(message.chat.id, "❌ Matn yuborilmadi.")
         return
     text = message.text
-    qr  = qrcode.make(text)
-    buf = io.BytesIO()
+    qr   = qrcode.make(text)
+    buf  = io.BytesIO()
     qr.save(buf, format="PNG")
     buf.seek(0)
-    _save_qr_history(message.from_user.id, text)
+    save_qr_history(message.from_user.id, text)
     bot.send_photo(message.chat.id, buf, caption="✅ QR Kod tayyor!")
 
 # =========================================================
-# QR — RANGLI
+#  QR — RANGLI
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "🎨 Rangli QR")
 def qr_colored_menu(message):
     if not guard(message):
         return
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("🔵 Ko'k",       callback_data="qrc_#1565C0"),
-        types.InlineKeyboardButton("🔴 Qizil",      callback_data="qrc_#C62828"),
-        types.InlineKeyboardButton("🟢 Yashil",     callback_data="qrc_#2E7D32"),
-        types.InlineKeyboardButton("🟣 Binafsha",   callback_data="qrc_#6A1B9A"),
-        types.InlineKeyboardButton("🟠 To'q sariq", callback_data="qrc_#E65100"),
-        types.InlineKeyboardButton("⚫ Qora (oddiy)",callback_data="qrc_#000000"),
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("🔵 Ko'k",        callback_data="qrc_#1565C0"),
+        types.InlineKeyboardButton("🔴 Qizil",       callback_data="qrc_#C62828"),
+        types.InlineKeyboardButton("🟢 Yashil",      callback_data="qrc_#2E7D32"),
+        types.InlineKeyboardButton("🟣 Binafsha",    callback_data="qrc_#6A1B9A"),
+        types.InlineKeyboardButton("🟠 To'q sariq",  callback_data="qrc_#E65100"),
+        types.InlineKeyboardButton("⚫ Qora",         callback_data="qrc_#000000"),
     )
-    bot.send_message(message.chat.id, "🎨 Rang tanlang:", reply_markup=markup)
+    bot.send_message(message.chat.id, "🎨 Rang tanlang:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("qrc_"))
 def qrc_selected(call):
     color = call.data.split("_", 1)[1]
     bot.answer_callback_query(call.id, f"Rang: {color}")
     bot.delete_message(call.message.chat.id, call.message.message_id)
-    msg = bot.send_message(call.message.chat.id, "✍️ Matn yoki link yuboring:", reply_markup=cancel_kb())
-    bot.register_next_step_handler(msg, lambda m: generate_colored_qr(m, color))
+    msg = bot.send_message(call.message.chat.id, "✍️ Matn yoki link yuboring:")
+    bot.register_next_step_handler(msg, lambda m: qr_colored_make(m, color))
 
-def generate_colored_qr(message, fill_color):
-    if is_cancel(message):
-        main_menu(message.chat.id, message.from_user.id)
+def qr_colored_make(message, fill_color):
+    if not message.text:
+        bot.send_message(message.chat.id, "❌ Matn yuborilmadi.")
         return
     text   = message.text
-    qr_obj = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, box_size=10, border=4)
+    qr_obj = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=4
+    )
     qr_obj.add_data(text)
     qr_obj.make(fit=True)
     img = qr_obj.make_image(fill_color=fill_color, back_color="white").convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
-    _save_qr_history(message.from_user.id, text)
-    bot.send_photo(message.chat.id, buf, caption=f"✅ Rangli QR tayyor!\n🎨 Rang: <code>{fill_color}</code>", parse_mode="HTML")
+    save_qr_history(message.from_user.id, text)
+    bot.send_photo(
+        message.chat.id,
+        buf,
+        caption=f"✅ Rangli QR tayyor!\n🎨 Rang: <code>{fill_color}</code>",
+        parse_mode="HTML"
+    )
 
 # =========================================================
-# QR — O'QISH
+#  QR — O'QISH
 # =========================================================
 
-@bot.message_handler(func=lambda m: m.text == "🖼 Rasm QR O'qish")
+@bot.message_handler(func=lambda m: m.text == "🖼 QR O'qish")
 def qr_read_prompt(message):
     if not guard(message):
         return
-    bot.send_message(message.chat.id, "🖼 QR kod rasmini yuboring:", reply_markup=cancel_kb())
+    bot.send_message(message.chat.id, "🖼 QR kod rasmini yuboring:")
 
 @bot.message_handler(content_types=["photo"])
-def decode_qr(message):
+def qr_decode(message):
     if not guard(message):
         return
     try:
-        fi   = bot.get_file(message.photo[-1].file_id)
-        data_bytes = bot.download_file(fi.file_path)
+        fi    = bot.get_file(message.photo[-1].file_id)
+        data  = bot.download_file(fi.file_path)
         fname = f"{message.from_user.id}_qr.png"
         with open(fname, "wb") as f:
-            f.write(data_bytes)
+            f.write(data)
 
         result = None
 
@@ -373,8 +386,8 @@ def decode_qr(message):
             result = val
 
         # 2-urinish: pyzbar
-        if not result and PYZBAR_AVAILABLE:
-            pil = Image.open(fname)
+        if not result and PYZBAR_OK:
+            pil     = Image.open(fname)
             decoded = pyzbar_decode(pil)
             if decoded:
                 result = decoded[0].data.decode("utf-8")
@@ -388,41 +401,44 @@ def decode_qr(message):
                 parse_mode="HTML"
             )
         else:
-            bot.send_message(message.chat.id, "❌ QR kod topilmadi. Rasmni aniqroq yuboring.")
+            bot.send_message(message.chat.id, "❌ QR kod topilmadi. Aniqroq rasm yuboring.")
 
     except Exception as e:
-        print(e)
+        print(f"[qr_decode] {e}")
         bot.send_message(message.chat.id, "❌ Xatolik yuz berdi.")
 
 # =========================================================
-# PROFIL
+#  PROFIL
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "👤 Profil")
 def profile(message):
     if not guard(message):
         return
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (message.from_user.id,))
+    uid = message.from_user.id
+    cursor.execute("SELECT * FROM users WHERE user_id=?", (uid,))
     u = cursor.fetchone()
     if not u:
         bot.send_message(message.chat.id, "❌ Profil topilmadi. /start bosing.")
         return
-    cursor.execute("SELECT COUNT(*) FROM qr_history WHERE user_id=?", (message.from_user.id,))
+    cursor.execute("SELECT COUNT(*) FROM qr_history WHERE user_id=?", (uid,))
     qr_count = cursor.fetchone()[0]
+    role = "👑 Ega" if is_owner(uid) else ("🛡 Admin" if is_admin(uid) else "👤 Foydalanuvchi")
     bot.send_message(
         message.chat.id,
-        f"👤 <b>Profil</b>\n\n"
+        f"👤 <b>PROFIL</b>\n\n"
         f"📛 Ism: <b>{u[1]}</b>\n"
         f"📱 Telefon: <b>{u[2]}</b>\n"
         f"🔗 Username: @{u[3] or '—'}\n"
         f"🆔 ID: <code>{u[0]}</code>\n"
         f"📅 Sana: {u[4]}\n"
+        f"🏷 Rol: {role}\n"
         f"📷 Jami QR: <b>{qr_count}</b> ta",
         parse_mode="HTML"
     )
 
 # =========================================================
-# TARIX
+#  TARIX
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "📜 Tarix")
@@ -443,19 +459,23 @@ def history(message):
     bot.send_message(message.chat.id, text, parse_mode="HTML")
 
 # =========================================================
-# TARIXNI TOZALASH
+#  TARIXNI TOZALASH
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "🗑 Tarixni Tozalash")
 def clear_history_ask(message):
     if not guard(message):
         return
-    markup = types.InlineKeyboardMarkup()
-    markup.row(
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
         types.InlineKeyboardButton("✅ Ha, o'chir",  callback_data="clr_yes"),
-        types.InlineKeyboardButton("❌ Yo'q, bekor", callback_data="clr_no")
+        types.InlineKeyboardButton("❌ Yo'q",        callback_data="clr_no")
     )
-    bot.send_message(message.chat.id, "⚠️ Barcha QR tarixingiz o'chiriladi. Tasdiqlaysizmi?", reply_markup=markup)
+    bot.send_message(
+        message.chat.id,
+        "⚠️ Barcha QR tarixingiz o'chiriladi. Tasdiqlaysizmi?",
+        reply_markup=kb
+    )
 
 @bot.callback_query_handler(func=lambda c: c.data in ("clr_yes", "clr_no"))
 def clear_history_cb(call):
@@ -469,7 +489,7 @@ def clear_history_cb(call):
         bot.send_message(call.message.chat.id, "❌ Bekor qilindi.")
 
 # =========================================================
-# ABOUT
+#  BOT HAQIDA
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "ℹ️ Bot Haqida")
@@ -480,10 +500,10 @@ def about(message):
         "✅ QR yaratish (oddiy + rangli)\n"
         "✅ Rasm QR o'qish\n"
         "✅ Profil va tarix\n"
-        "✅ Admin / Ega paneli\n"
+        "✅ Ega / Admin paneli\n"
         "✅ Dinamik kanal boshqaruvi\n"
         "✅ Ban / Unban tizimi\n"
-        "✅ Broadcast (rasm + matn)\n"
+        "✅ Broadcast\n"
         "✅ Spam himoya\n"
         "✅ Foydalanuvchi qidirish va eksport\n\n"
         "👨‍💻 Developer: <b>Murodbek</b>",
@@ -491,63 +511,7 @@ def about(message):
     )
 
 # =========================================================
-#  ██████╗  ██████╗  ██████╗  █████╗ ██╗
-# ██╔═══██╗██╔═══██╗██╔════╝ ██╔══██╗██║
-# ██║   ██║██║   ██║██║  ███╗███████║██║
-# ██║   ██║██║   ██║██║   ██║██╔══██║╚═╝
-#  ██████╔╝╚██████╔╝╚██████╔╝██║  ██║██╗
-#  ╚═════╝  ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝
-# =========================================================
-
-def owner_panel_kb(chat_id):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("👥 Userlar",     "🔍 Qidirish")
-    markup.row("📊 Statistika",  "📤 Eksport")
-    markup.row("📢 Broadcast",   "💬 Xabar Yuborish")
-    markup.row("🛡 Adminlar",    "➕ Admin Qo'shish", "➖ Admin O'chirish")
-    markup.row("🔨 Ban",         "🔓 Unban",           "🚫 Banlist")
-    markup.row("📡 Kanallar",    "➕ Kanal Qo'sh",    "➖ Kanal O'chir")
-    markup.row("🏠 Asosiy Menu")
-    bot.send_message(chat_id, "👑 EGA PANELI", reply_markup=markup)
-
-def admin_panel_kb(chat_id):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("👥 Userlar",    "🔍 Qidirish")
-    markup.row("📊 Statistika", "📤 Eksport")
-    markup.row("📢 Broadcast",  "💬 Xabar Yuborish")
-    markup.row("🏠 Asosiy Menu")
-    bot.send_message(chat_id, "🛠 ADMIN PANELI", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: m.text == "👑 Ega Paneli")
-def open_owner_panel(message):
-    if not is_owner(message.from_user.id):
-        return
-    owner_panel_kb(message.chat.id)
-
-@bot.message_handler(func=lambda m: m.text == "🛠 Admin Paneli")
-def open_admin_panel(message):
-    if not is_admin(message.from_user.id):
-        return
-    if is_owner(message.from_user.id):
-        owner_panel_kb(message.chat.id)
-    else:
-        admin_panel_kb(message.chat.id)
-
-@bot.message_handler(commands=["panel"])
-def panel_cmd(message):
-    if not is_admin(message.from_user.id):
-        return
-    if is_owner(message.from_user.id):
-        owner_panel_kb(message.chat.id)
-    else:
-        admin_panel_kb(message.chat.id)
-
-@bot.message_handler(func=lambda m: m.text == "🏠 Asosiy Menu")
-def back_main(message):
-    main_menu(message.chat.id, message.from_user.id)
-
-# =========================================================
-# STATISTIKA
+#  STATISTIKA
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "📊 Statistika")
@@ -583,7 +547,7 @@ def statistics(message):
     )
 
 # =========================================================
-# USERLAR
+#  USERLAR RO'YXATI
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "👥 Userlar")
@@ -602,21 +566,21 @@ def users_list(message):
         bot.send_message(message.chat.id, text[x:x+4000], parse_mode="HTML")
 
 # =========================================================
-# QIDIRISH
+#  QIDIRISH
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "🔍 Qidirish")
 def search_menu(message):
     if not is_admin(message.from_user.id):
         return
-    msg = bot.send_message(message.chat.id, "🔍 ID yoki ism kiriting:", reply_markup=cancel_kb())
+    msg = bot.send_message(message.chat.id, "🔍 ID yoki ism kiriting:")
     bot.register_next_step_handler(msg, search_user)
 
 def search_user(message):
-    if is_cancel(message):
-        panel_cmd(message)
+    q = message.text.strip() if message.text else ""
+    if not q:
+        bot.send_message(message.chat.id, "❌ Bo'sh qiymat.")
         return
-    q = message.text.strip()
     if q.isdigit():
         cursor.execute("SELECT * FROM users WHERE user_id=?", (int(q),))
     else:
@@ -627,7 +591,8 @@ def search_user(message):
         return
     for u in rows[:5]:
         cursor.execute("SELECT COUNT(*) FROM qr_history WHERE user_id=?", (u[0],))
-        qn = cursor.fetchone()[0]
+        qn   = cursor.fetchone()[0]
+        role = "👑 Ega" if is_owner(u[0]) else ("🛡 Admin" if is_admin(u[0]) else "👤 User")
         bot.send_message(
             message.chat.id,
             f"👤 <b>{u[1]}</b>\n"
@@ -635,12 +600,13 @@ def search_user(message):
             f"📱 {u[2]}\n"
             f"🔗 @{u[3] or '—'}\n"
             f"📅 {u[4]}\n"
+            f"🏷 {role}\n"
             f"📷 QR: <b>{qn}</b> ta",
             parse_mode="HTML"
         )
 
 # =========================================================
-# EKSPORT
+#  EKSPORT
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "📤 Eksport")
@@ -660,7 +626,7 @@ def export_users(message):
     bot.send_document(message.chat.id, buf, caption=f"✅ Jami {len(rows)} ta foydalanuvchi")
 
 # =========================================================
-# BROADCAST  (matn + rasm + video)
+#  BROADCAST
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "📢 Broadcast")
@@ -669,15 +635,11 @@ def broadcast_menu(message):
         return
     msg = bot.send_message(
         message.chat.id,
-        "✍️ Reklama xabarini yuboring (matn, rasm+izoh yoki video):",
-        reply_markup=cancel_kb()
+        "✍️ Reklama xabarini yuboring (matn, rasm+izoh yoki video):"
     )
-    bot.register_next_step_handler(msg, send_broadcast)
+    bot.register_next_step_handler(msg, broadcast_send)
 
-def send_broadcast(message):
-    if is_cancel(message):
-        panel_cmd(message)
-        return
+def broadcast_send(message):
     cursor.execute("SELECT user_id FROM users")
     all_u = cursor.fetchall()
     ok = 0
@@ -692,42 +654,43 @@ def send_broadcast(message):
             ok += 1
         except Exception:
             pass
-    bot.send_message(message.chat.id, f"✅ Yuborildi: <b>{ok}</b> / {len(all_u)}", parse_mode="HTML")
+    bot.send_message(
+        message.chat.id,
+        f"✅ Yuborildi: <b>{ok}</b> / {len(all_u)}",
+        parse_mode="HTML"
+    )
 
 # =========================================================
-# FOYDALANUVCHIGA XABAR
+#  FOYDALANUVCHIGA XABAR
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "💬 Xabar Yuborish")
-def msg_user_menu(message):
+def msg_to_user_menu(message):
     if not is_admin(message.from_user.id):
         return
-    msg = bot.send_message(message.chat.id, "🆔 Foydalanuvchi ID si:", reply_markup=cancel_kb())
-    bot.register_next_step_handler(msg, msg_user_id)
+    msg = bot.send_message(message.chat.id, "🆔 Foydalanuvchi ID sini kiriting:")
+    bot.register_next_step_handler(msg, msg_to_user_id)
 
-def msg_user_id(message):
-    if is_cancel(message):
-        panel_cmd(message)
-        return
-    if not message.text.isdigit():
+def msg_to_user_id(message):
+    if not message.text or not message.text.isdigit():
         bot.send_message(message.chat.id, "❌ Noto'g'ri ID.")
         return
     tid = int(message.text)
-    msg = bot.send_message(message.chat.id, "✍️ Xabar matni:", reply_markup=cancel_kb())
-    bot.register_next_step_handler(msg, lambda m: msg_user_send(m, tid))
+    msg = bot.send_message(message.chat.id, "✍️ Xabar matni:")
+    bot.register_next_step_handler(msg, lambda m: msg_to_user_send(m, tid))
 
-def msg_user_send(message, tid):
-    if is_cancel(message):
-        panel_cmd(message)
-        return
+def msg_to_user_send(message, tid):
     try:
         bot.send_message(tid, f"📩 <b>Admin xabari:</b>\n\n{message.text}", parse_mode="HTML")
         bot.send_message(message.chat.id, "✅ Xabar yuborildi.")
     except Exception:
-        bot.send_message(message.chat.id, "❌ Xabar yuborib bo'lmadi (user botni bloklagan bo'lishi mumkin).")
+        bot.send_message(
+            message.chat.id,
+            "❌ Xabar yuborib bo'lmadi (user botni bloklagan bo'lishi mumkin)."
+        )
 
 # =========================================================
-# ADMINLAR
+#  ADMINLAR  (faqat ega)
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "🛡 Adminlar")
@@ -744,25 +707,27 @@ def show_admins(message):
         text += f"🆔 <code>{aid}</code>\n"
     bot.send_message(message.chat.id, text, parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text == "➕ Admin Qo'shish")
+@bot.message_handler(func=lambda m: m.text == "➕ Admin Qo'sh")
 def add_admin_menu(message):
     if not is_owner(message.from_user.id):
         return
-    msg = bot.send_message(message.chat.id, "🆔 Yangi admin ID si:", reply_markup=cancel_kb())
-    bot.register_next_step_handler(msg, save_admin)
+    msg = bot.send_message(message.chat.id, "🆔 Yangi admin ID sini kiriting:")
+    bot.register_next_step_handler(msg, add_admin_save)
 
-def save_admin(message):
-    if is_cancel(message):
-        owner_panel_kb(message.chat.id)
-        return
-    if not message.text.isdigit():
+def add_admin_save(message):
+    if not message.text or not message.text.isdigit():
         bot.send_message(message.chat.id, "❌ Noto'g'ri ID.")
         return
-    cursor.execute("INSERT OR REPLACE INTO admins VALUES(?)", (int(message.text),))
+    aid = int(message.text)
+    cursor.execute("INSERT OR REPLACE INTO admins VALUES(?)", (aid,))
     conn.commit()
-    bot.send_message(message.chat.id, f"✅ Admin qo'shildi: <code>{message.text}</code>", parse_mode="HTML")
+    bot.send_message(
+        message.chat.id,
+        f"✅ Admin qo'shildi: <code>{aid}</code>",
+        parse_mode="HTML"
+    )
 
-@bot.message_handler(func=lambda m: m.text == "➖ Admin O'chirish")
+@bot.message_handler(func=lambda m: m.text == "➖ Admin O'chir")
 def del_admin_menu(message):
     if not is_owner(message.from_user.id):
         return
@@ -771,61 +736,58 @@ def del_admin_menu(message):
     if not rows:
         bot.send_message(message.chat.id, "❌ Admin mavjud emas.")
         return
-    markup = types.InlineKeyboardMarkup()
+    kb = types.InlineKeyboardMarkup()
     for (aid,) in rows:
-        markup.add(
-            types.InlineKeyboardButton(
-                f"🗑 {aid} ni o'chir",
-                callback_data=f"deladm_{aid}"
-            )
-        )
-    markup.add(types.InlineKeyboardButton("❌ Bekor", callback_data="deladm_cancel"))
-    bot.send_message(message.chat.id, "🛡 O'chirmoqchi bo'lgan adminni tanlang:", reply_markup=markup)
+        kb.add(types.InlineKeyboardButton(
+            f"🗑 {aid} — O'chir",
+            callback_data=f"deladm_{aid}"
+        ))
+    bot.send_message(message.chat.id, "🛡 O'chirmoqchi bo'lgan adminni tanlang:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("deladm_"))
 def del_admin_cb(call):
     bot.answer_callback_query(call.id)
     bot.delete_message(call.message.chat.id, call.message.message_id)
-    if call.data == "deladm_cancel":
-        return
     aid = int(call.data.split("_", 1)[1])
     cursor.execute("DELETE FROM admins WHERE user_id=?", (aid,))
     conn.commit()
-    bot.send_message(call.message.chat.id, f"✅ Admin o'chirildi: <code>{aid}</code>", parse_mode="HTML")
+    bot.send_message(
+        call.message.chat.id,
+        f"✅ Admin o'chirildi: <code>{aid}</code>",
+        parse_mode="HTML"
+    )
 
 # =========================================================
-# BAN / UNBAN / BANLIST
+#  BAN / UNBAN / BANLIST  (faqat ega)
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "🔨 Ban")
 def ban_menu(message):
     if not is_owner(message.from_user.id):
         return
-    msg = bot.send_message(message.chat.id, "🆔 Ban qilinadigan user ID:", reply_markup=cancel_kb())
+    msg = bot.send_message(message.chat.id, "🆔 Ban qilinadigan user ID:")
     bot.register_next_step_handler(msg, ban_get_id)
 
 def ban_get_id(message):
-    if is_cancel(message):
-        owner_panel_kb(message.chat.id)
-        return
-    if not message.text.isdigit():
+    if not message.text or not message.text.isdigit():
         bot.send_message(message.chat.id, "❌ Noto'g'ri ID.")
         return
     tid = int(message.text)
-    msg = bot.send_message(message.chat.id, "📝 Ban sababi:", reply_markup=cancel_kb())
+    msg = bot.send_message(message.chat.id, "📝 Ban sababi:")
     bot.register_next_step_handler(msg, lambda m: ban_apply(m, tid))
 
 def ban_apply(message, tid):
-    if is_cancel(message):
-        owner_panel_kb(message.chat.id)
-        return
-    reason = message.text
+    reason = message.text or "Sabab ko'rsatilmagan"
     cursor.execute(
         "INSERT OR REPLACE INTO banned_users VALUES(?,?,?)",
         (tid, reason, datetime.now().strftime("%d.%m.%Y %H:%M"))
     )
     conn.commit()
-    bot.send_message(message.chat.id, f"✅ <code>{tid}</code> bloklandi.\nSabab: {reason}", parse_mode="HTML")
+    bot.send_message(
+        message.chat.id,
+        f"✅ <code>{tid}</code> bloklandi.\nSabab: {reason}",
+        parse_mode="HTML"
+    )
     try:
         bot.send_message(tid, f"🚫 Siz botdan bloklandi.\nSabab: {reason}")
     except Exception:
@@ -840,27 +802,26 @@ def unban_menu(message):
     if not rows:
         bot.send_message(message.chat.id, "✅ Banlangan user yo'q.")
         return
-    markup = types.InlineKeyboardMarkup()
+    kb = types.InlineKeyboardMarkup()
     for (uid, reason) in rows:
-        markup.add(
-            types.InlineKeyboardButton(
-                f"🔓 {uid} — {reason[:20]}",
-                callback_data=f"unban_{uid}"
-            )
-        )
-    markup.add(types.InlineKeyboardButton("❌ Bekor", callback_data="unban_cancel"))
-    bot.send_message(message.chat.id, "🔓 Unban qilmoqchi bo'lgan userni tanlang:", reply_markup=markup)
+        kb.add(types.InlineKeyboardButton(
+            f"🔓 {uid} — {reason[:20]}",
+            callback_data=f"unban_{uid}"
+        ))
+    bot.send_message(message.chat.id, "🔓 Unban qilmoqchi bo'lgan userni tanlang:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("unban_"))
 def unban_cb(call):
     bot.answer_callback_query(call.id)
     bot.delete_message(call.message.chat.id, call.message.message_id)
-    if call.data == "unban_cancel":
-        return
     uid = int(call.data.split("_", 1)[1])
     cursor.execute("DELETE FROM banned_users WHERE user_id=?", (uid,))
     conn.commit()
-    bot.send_message(call.message.chat.id, f"✅ <code>{uid}</code> unban qilindi.", parse_mode="HTML")
+    bot.send_message(
+        call.message.chat.id,
+        f"✅ <code>{uid}</code> unban qilindi.",
+        parse_mode="HTML"
+    )
     try:
         bot.send_message(uid, "✅ Siz botdan blok olindi! Qayta foydalana olasiz.")
     except Exception:
@@ -881,7 +842,7 @@ def banlist(message):
     bot.send_message(message.chat.id, text, parse_mode="HTML")
 
 # =========================================================
-# 📡 KANAL BOSHQARUVI  ── YANGI (dinamik)
+#  KANAL BOSHQARUVI  (faqat ega)
 # =========================================================
 
 @bot.message_handler(func=lambda m: m.text == "📡 Kanallar")
@@ -892,18 +853,16 @@ def show_channels(message):
     if not channels:
         bot.send_message(message.chat.id, "❌ Hech qanday kanal yo'q.")
         return
-    markup = types.InlineKeyboardMarkup()
+    kb = types.InlineKeyboardMarkup()
     for ch in channels:
-        markup.add(
-            types.InlineKeyboardButton(
-                f"📢 {ch}",
-                url=f"https://t.me/{ch.lstrip('@')}"
-            )
-        )
+        kb.add(types.InlineKeyboardButton(
+            f"📢 {ch}",
+            url=f"https://t.me/{ch.lstrip('@')}"
+        ))
     bot.send_message(
         message.chat.id,
         f"📡 <b>MAJBURIY OBUNA KANALLARI ({len(channels)} ta):</b>",
-        reply_markup=markup,
+        reply_markup=kb,
         parse_mode="HTML"
     )
 
@@ -914,30 +873,23 @@ def add_channel_menu(message):
     msg = bot.send_message(
         message.chat.id,
         "📡 Kanal username kiriting:\nMisol: <code>@kanalname</code>",
-        parse_mode="HTML",
-        reply_markup=cancel_kb()
+        parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, add_channel_save)
 
 def add_channel_save(message):
-    if is_cancel(message):
-        owner_panel_kb(message.chat.id)
-        return
-    username = message.text.strip()
+    username = (message.text or "").strip()
     if not username.startswith("@"):
         username = "@" + username
-
-    # Kanal mavjudligini tekshir
     try:
-        chat = bot.get_chat(username)
+        chat  = bot.get_chat(username)
         title = chat.title
     except Exception:
         bot.send_message(
             message.chat.id,
-            "❌ Kanal topilmadi. Username to'g'ri ekanligini va bot kanalga qo'shilganligini tekshiring."
+            "❌ Kanal topilmadi. Username to'g'ri ekanligini va bot kanalga admin sifatida qo'shilganligini tekshiring."
         )
         return
-
     cursor.execute("INSERT OR IGNORE INTO channels(username) VALUES(?)", (username,))
     conn.commit()
     bot.send_message(
@@ -954,20 +906,13 @@ def del_channel_menu(message):
     if not channels:
         bot.send_message(message.chat.id, "❌ O'chiriladigan kanal yo'q.")
         return
-    markup = types.InlineKeyboardMarkup()
+    kb = types.InlineKeyboardMarkup()
     for ch in channels:
-        markup.add(
-            types.InlineKeyboardButton(
-                f"🗑 {ch} ni o'chir",
-                callback_data=f"delch_{ch}"
-            )
-        )
-    markup.add(types.InlineKeyboardButton("❌ Bekor", callback_data="delch_cancel"))
-    bot.send_message(
-        message.chat.id,
-        "📡 O'chirmoqchi bo'lgan kanalni tanlang:",
-        reply_markup=markup
-    )
+        kb.add(types.InlineKeyboardButton(
+            f"🗑 {ch} — O'chir",
+            callback_data=f"delch_{ch}"
+        ))
+    bot.send_message(message.chat.id, "📡 O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("delch_"))
 def del_channel_cb(call):
@@ -985,43 +930,35 @@ def del_channel_cb(call):
     )
 
 # =========================================================
-# CALLBACK — obuna tekshiruvi
+#  OBUNA TEKSHIRUVI  (callback)
 # =========================================================
 
 @bot.callback_query_handler(func=lambda c: c.data == "check_sub")
-def callback_check_sub(call):
+def cb_check_sub(call):
     if check_sub(call.from_user.id):
         bot.answer_callback_query(call.id, "✅ Tasdiqlandi!")
         bot.delete_message(call.message.chat.id, call.message.message_id)
-        # start() ni qayta chaqirish uchun fake message
         call.message.from_user = call.from_user
-        start(call.message)
+        cmd_start(call.message)
     else:
-        bot.answer_callback_query(call.id, "❌ Hali barcha kanallarga obuna bo'lmadingiz!", show_alert=True)
+        bot.answer_callback_query(
+            call.id,
+            "❌ Hali barcha kanallarga obuna bo'lmadingiz!",
+            show_alert=True
+        )
 
 # =========================================================
-# HELPER
-# =========================================================
-
-def _save_qr_history(user_id, text):
-    cursor.execute(
-        "INSERT INTO qr_history(user_id, qr_text, created_date) VALUES(?,?,?)",
-        (user_id, text, datetime.now().strftime("%d.%m.%Y %H:%M"))
-    )
-    conn.commit()
-
-# =========================================================
-# UNKNOWN
+#  NOMA'LUM XABAR
 # =========================================================
 
 @bot.message_handler(func=lambda m: True)
 def unknown(message):
     bot.send_message(
         message.chat.id,
-        "❓ Noma'lum buyruq.\n\n/start — Bosh sahifa\n/panel — Admin panel"
+        "❓ Noma'lum buyruq.\n\n/start — Bosh sahifa\n/panel — Panel"
     )
 
 # =========================================================
-# RUN
+#  RUN
 # =========================================================
 bot.infinity_polling()
