@@ -6,7 +6,7 @@
 # =========================================================
 #  CONFIG
 # =========================================================
-TOKEN            = "8608839152:AAF2BTh1h1ppv8J56ZX8Oy2vAkzr69gv7EY"
+TOKEN            = "8608839152:AAGhJIBi7WMC7ODoRxzu0StKn2wyeEJbFwY"
 OWNER_ID         = 8133971943
 DEFAULT_CHANNELS = ["@murodbek_rashidov"]
 RATE_LIMIT_SEC   = 2
